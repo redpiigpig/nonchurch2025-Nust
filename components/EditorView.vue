@@ -940,7 +940,7 @@ onMounted(async () => {
 });
 
 // ── 儲存 ─────────────────────────────────────────────────────────
-const saveArticle = async (silent = false) => {
+const saveArticle = async (silent = false, opts = {}) => {
   if (!form.value.id) {
     if (!silent) alert("文章 ID 是必填項目！");
     return;
@@ -978,10 +978,14 @@ const saveArticle = async (silent = false) => {
     seo: seoParsed,
     is_published: isPublished.value,
     proofread_annotations: proofreadAnnotations.value,
-    proofread_status: proofreadStatus.value,
     updated_at: new Date().toISOString(),
   };
   delete payload.media_assets;
+
+  // 校對狀態只有「完成初稿」按鈕（markDraftDone）會寫入。一般儲存與自動儲存
+  // 一律不帶這欄，否則編輯器分頁停在舊值時，會把校對頁剛設好的 completed
+  // 蓋回 pending（2026-09-08 第十期 10-10 就是這樣被打回待校對）。
+  if (opts.writeProofreadStatus) payload.proofread_status = proofreadStatus.value;
 
   // 重要：編輯既有文章時改用 update，避免每次都走 upsert(on_conflict=id)
   // 某些 RLS/權限組合下 upsert 會觸發 401（尤其是只允許 update 不允許 insert 時）
@@ -1022,7 +1026,7 @@ const saveArticle = async (silent = false) => {
 
 const markDraftDone = async () => {
   proofreadStatus.value = "pending";
-  await saveArticle(false);
+  await saveArticle(false, { writeProofreadStatus: true });
 };
 
 // ── 自動儲存（debounce 2s）────────────────────────────────────────
