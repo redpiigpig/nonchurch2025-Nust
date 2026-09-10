@@ -59,6 +59,7 @@
   _insert_figure_wordprocessing_group(...)    L.614  圖＋圖說 wpg 群組（可縮放／穿透繞排）
   _add_figure_textbox(...)                    L.589  左／右浮動圖（呼叫 wpg）
   _add_caption_runs(paragraph, lines)         L.563  圖說文字渲染
+  _count_caption_lines(lines, box_width)      L.563  圖說換行後的實際行數（撐開圖說方塊高度）
   _insert_float_image(p, stream, width, dir)  L.295  插入浮動圖片（繞排）
 
 【表格】
@@ -104,6 +105,10 @@ if sys.stderr.encoding != 'utf-8':
 DOC_BODY_WIDTH_CM = 14.2
 DOC_PORTRAIT_SIDE_CM = 8.0
 DOC_FLOAT_BODY_HALF_CM = DOC_BODY_WIDTH_CM / 2
+# 置中大圖的高度上限：滿欄寬（14.2cm）的直式照片會長到 18.9cm，整頁只剩幾十個字。
+# 超過此高度就依比例縮小（寬度跟著縮），確保每張圖下面都還留得住內文。
+# 11.0cm 是刻意訂的：4:3 橫式照片滿欄剛好 10.65cm，不受影響；只有直式／正方形會被縮。
+DOC_CENTER_IMAGE_MAX_H_CM = 11.0
 
 # 「本期作者簡介」頁：表格外框灰；頭像框線為黑色減淡約 25%（#404040，對照編輯用語）
 AUTHOR_INTRO_TABLE_BORDER_GRAY = "A6A6A6"
@@ -773,6 +778,25 @@ class ProfessionalDocxGenerator:
             wrap_through=wrap_through,
         )
 
+    @staticmethod
+    def _count_caption_lines(caption_lines, box_width_emu):
+        """圖說在固定寬度文字方塊內換行後的實際行數。
+
+        圖說為 10pt：全形字寬 10pt（127000 EMU），半形字約半寬。
+        方塊左右內縮各 12700 EMU（見 wps:bodyPr lIns/rIns）。
+        """
+        if not caption_lines:
+            return 0
+        inner = max(int(box_width_emu) - 25400, 127000)
+        full = 127000
+        total = 0
+        for line in caption_lines:
+            width = 0
+            for ch in line:
+                width += full if ord(ch) > 0x2000 else full // 2
+            total += max(1, -(-width // inner))   # ceil
+        return total
+
     def _add_caption_runs(self, paragraph, lines):
         """將圖說多行（原 <br> 分割）加入段落，行間用 w:br 換行"""
         for i, line in enumerate(lines):
@@ -825,12 +849,19 @@ class ProfessionalDocxGenerator:
             img_cx, img_cy = image.scaled_dimensions(Cm(width_cm), Cm(width_cm))
         else:
             img_cx, img_cy = image.scaled_dimensions(Cm(width_cm), None)
+            # 置中大圖限高：直式照片依滿欄寬會撐掉整頁，超過上限就改用高度換算寬度
+            if float_dir == 'center':
+                max_h = int(Cm(DOC_CENTER_IMAGE_MAX_H_CM))
+                if int(img_cy) > max_h:
+                    img_cx, img_cy = image.scaled_dimensions(None, Emu(max_h))
         img_cx, img_cy = int(img_cx), int(img_cy)
 
-        # 圖說高度：約 10pt/行（過大會在圖說下方留下空白區）
+        # 圖說高度：約 10pt/行（過大會在圖說下方留下空白區）。
+        # 長圖說會在方塊內自動換行，須把換行後的實際行數算進去，否則超出的字會被 Word 壓成極小字。
         cap_gap = 6350 if caption_lines else 0
         line_emu = 210000
-        cap_h = (len(caption_lines) * line_emu + 50000) if caption_lines else 0
+        cap_lines_wrapped = self._count_caption_lines(caption_lines, img_cx)
+        cap_h = (cap_lines_wrapped * line_emu + 50000) if caption_lines else 0
 
         Wg = img_cx
         Hg = img_cy + cap_gap + cap_h
@@ -2951,8 +2982,10 @@ def _apply_article_body(generator, article_data):
         article_data.get('remark'),
     )
     if not is_toc and not generator.is_editorial_report:
-        generator._add_blank_line()   # 空行（作者與關鍵字之間）
+        # 作者與關鍵字之間：有關鍵字時空 1 行，無關鍵字時（直接接內文）維持 2 行
         generator._add_blank_line()
+        if not article_data.get('keyword'):
+            generator._add_blank_line()
     elif generator.is_editorial_report and article_data.get('keyword'):
         generator._add_blank_line()
 
